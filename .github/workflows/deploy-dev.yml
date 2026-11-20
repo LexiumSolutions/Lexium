@@ -1,0 +1,21 @@
+# STUB: deployment to the AWS dev environment.
+# Do not enable until the AWS environment exists (task: Provision AWS accounts and environments).
+# When ready: use GitHub OIDC with an AWS IAM role (no long-lived AWS keys in GitHub secrets).
+name: Deploy to dev (not configured yet)
+
+on:
+  workflow_dispatch:   # manual trigger only
+
+permissions:
+  contents: read
+  id-token: write      # needed later for AWS OIDC
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - name: Placeholder
+        run: echo "Deployment is not configured yet. See the AWS environment task."
