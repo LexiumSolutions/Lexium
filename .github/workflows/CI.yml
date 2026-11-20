@@ -1,0 +1,145 @@
+# Initial CI pipeline for the Lexium repository (task: initial CI/CD pipeline, Sprint 0)
+# Layout from the repository: server/Lexium-Backend (Java 25, Gradle) and client/Lexium-Frontend (Node 26).
+# The build tool of server/ (Maven or Gradle) and the package manager of the frontend
+# (npm, pnpm or yarn) are detected automatically from the files in each folder.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]   # change to master if your default branch is called master
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JAVA_VERSION: "25"   # from the README
+  NODE_VERSION: "26"   # from the README
+
+jobs:
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan repository history for secrets
+        run: >
+          docker run --rm -v "${{ github.workspace }}:/repo"
+          zricethezav/gitleaks:latest detect --source /repo --redact --verbose
+
+  backend:
+    name: Backend (build and test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server/Lexium-Backend
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: lexium_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres   # throwaway value, CI only
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U postgres -d lexium_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect build tool
+        id: detect
+        run: |
+          if [ -f pom.xml ]; then echo "cache=maven" >> "$GITHUB_OUTPUT"
+          elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then echo "cache=gradle" >> "$GITHUB_OUTPUT"
+          else echo "cache=" >> "$GITHUB_OUTPUT"; echo "No pom.xml or build.gradle found directly in server/Lexium-Backend/"
+          fi
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: ${{ steps.detect.outputs.cache }}
+      - name: Build and run tests
+        run: |
+          if [ -f mvnw ]; then chmod +x mvnw; ./mvnw -B -ntp verify
+          elif [ -f pom.xml ]; then mvn -B -ntp verify
+          elif [ -f gradlew ]; then chmod +x gradlew; ./gradlew build --no-daemon
+          elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then gradle build --no-daemon
+          else echo "No Maven or Gradle project found directly in server/Lexium-Backend/"; exit 1
+          fi
+        # The database is reachable at localhost:5432, db lexium_test, user postgres, password postgres.
+        # Add the settings your tests need as env vars here when integration tests exist.
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-reports
+          path: |
+            server/Lexium-Backend/build/reports/tests
+            server/Lexium-Backend/build/test-results
+            server/Lexium-Backend/target/surefire-reports
+          if-no-files-found: ignore
+
+  frontend:
+    name: Frontend (lint, test, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client/Lexium-Frontend
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Detect package manager
+        run: |
+          if [ -f pnpm-lock.yaml ]; then echo "PM=pnpm" >> "$GITHUB_ENV"; npm install -g pnpm
+          elif [ -f yarn.lock ]; then echo "PM=yarn" >> "$GITHUB_ENV"; corepack enable
+          else echo "PM=npm" >> "$GITHUB_ENV"
+          fi
+      - name: Install dependencies
+        run: |
+          case "$PM" in
+            pnpm) pnpm install --frozen-lockfile ;;
+            yarn) yarn install --frozen-lockfile ;;
+            *) if [ -f package-lock.json ]; then npm ci; else npm install; fi ;;
+          esac
+      - name: Lint, test and build
+        run: |
+          run_script() {
+            if node -e "process.exit(require('./package.json').scripts && require('./package.json').scripts['$1'] ? 0 : 1)"; then
+              echo "Running $1"; $PM run "$1"
+            else
+              echo "No '$1' script found, skipping"
+            fi
+          }
+          run_script lint
+          run_script test
+          run_script build
+        env:
+          CI: "true"
+      - name: Dependency audit (warning only at first)
+        run: npm audit --audit-level=high
+        continue-on-error: true
+
+  ci-result:
+    name: CI result
+    if: always()
+    needs: [secret-scan, backend, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any job failed
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') }}" = "true" ] || [ "${{ contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "One or more CI jobs failed"; exit 1
+          fi
