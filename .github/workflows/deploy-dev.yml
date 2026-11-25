@@ -16,6 +16,6 @@ jobs:
     runs-on: ubuntu-latest
     environment: dev
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Placeholder
         run: echo "Deployment is not configured yet. See the AWS environment task."
